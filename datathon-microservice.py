@@ -17,6 +17,7 @@ answers_table = dynamodb.Table('datathon-answers')
 def respond(err=None, res=None):
     logger.info('Sending response err %s res %s' % (err,json.dumps(res, indent=2)) )
     return {
+        'isBase64Encoded': False,
         'statusCode': '400' if err else '200',
         'body': err if err else json.dumps(res),
         'headers': {
@@ -24,7 +25,7 @@ def respond(err=None, res=None):
             'Access-Control-Allow-Headers':'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
             'Access-Control-Allow-Methods':'DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT',
             'Access-Control-Allow-Origin':'*'
-        },
+        }
     }
 
 
@@ -122,19 +123,19 @@ def get_challenge_hint(event):
     
 def get_leaderboard(event):
 
-    points = dict()
+    leaderboard = dict()
 
     response = query_leaderboard()
     while True:
         for team in response['Items']:
-            points[team['teamId']] = team['qualifyingPoints'] + team['pitchPoints'] + team['gamePoints'] + team['kahootPoints']
+            leaderboard[team['teamId']] = team['qualifyingPoints'] + team['pitchPoints'] + team['gamePoints'] + team['kahootPoints']
         
         if 'LastEvaluatedKey' in response:
             response = query_leaderboard(response['LastEvaluatedKey'])
         else:
             break
     
-    return [{ "position": index, "teamName": team, "score": points[team]} for index, team in enumerate(sorted(points, key=lambda t: points[t], reverse=True))]
+    return respond(res=[{ "position": index, "teamName": team, "score": int(leaderboard[team])} for index, team in enumerate(sorted(leaderboard, key=lambda t: leaderboard[t], reverse=True))])
     
 def post_challenge_answer(event):
     respond()
