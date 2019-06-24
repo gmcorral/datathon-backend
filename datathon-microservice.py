@@ -14,6 +14,9 @@ teams_table = dynamodb.Table('datathon-teams')
 challenges_table = dynamodb.Table('datathon-challenges')
 answers_table = dynamodb.Table('datathon-answers')
 
+# challenges cache
+challenges = dict()
+
 def respond(err=None, res=None, status=200):
     logger.info('Sending response err %s res %s' % (err,json.dumps(res, indent=2)) )
     return {
@@ -82,7 +85,7 @@ def lambda_handler(event, context):
             return get_challenges(username)
         elif resource == '/challenges/{id}/hint':
             logger.info('get_challenge_hint')
-            return get_challenge_hint(username)
+            return get_challenge_hint(event, username)
         else:
             logger.error('No matching GET resource')
             return respond(err=ValueError('Unknown resource "{}"'.format(resource)), status=400)
@@ -90,8 +93,8 @@ def lambda_handler(event, context):
     elif operation == 'POST':
         if resource == '/challenges/{id}/answer':
             logger.info('post_challenge_answer')
-            return post_challenge_answer(username)
-        else:
+            return post_challenge_answer(event, username)
+        else: 
             logger.error('No matching POST resource')
             return respond(err=ValueError('Unknown resource "{}"'.format(resource)), status=400)
 
@@ -99,56 +102,85 @@ def lambda_handler(event, context):
         logger.error('No matching method')
         return respond(err=ValueError('Unsupported method "{}"'.format(operation)), status=400)
 
-def get_challenges(username):
-    return respond(res=[
-        {
-            "challengeId": "ch01",
-            "title": "Challenge 1",
-            "description": "This is the first challenge and is a very easy one",
-            "points": 100,
-            "hinted": False,
-            "hint": None,
-            "status": "UNANSWERED",
-            "answer": None
-        },
-        {
-            "challengeId": "ch02",
-            "title": "Challenge 2",
-            "description": "This is the second challenge and is not that easy",
-            "points": 200,
-            "hinted": True,
-            "hint": "This is a hint!!",
-            "status": "ANSWERED",
-            "answer": "This is an answer for the challenge"
-        }
-    ])
 
-def get_challenge_hint(username):
+#################
+# HTTP method functions
+
+
+def get_challenges(username):
+
+    # Load challenges cache
+    if not challenges:
+        response = scan_challenges()
+        while True:
+            for ch in response['Items']:
+                challenges[ch['challengeId']] = ch
+                challenges[ch['challengeId']].update(
+                    {
+                        "answer": None,
+                        "hinted": False,
+                        "status": "UNANSWERED",
+                        "points": float(ch['points'])
+                    }
+                )
+            
+            if 'LastEvaluatedKey' in response:
+                response = scan_challenges(response['LastEvaluatedKey'])
+            else:
+                break
+
+    # Add team data
+    team_challenges = challenges.copy()
+    response = query_answers(username)
+    while True:
+        for answer in response['Items']:
+            team_challenges[answer['challengeId']].update(
+                {
+                    "answer": answer['answer'] if 'answer' in answer else None,
+                    "hinted": answer['hinted'],
+                    "status": answer['status']
+                }
+            )
+        
+        if 'LastEvaluatedKey' in response:
+            response = query_answers(username, response['LastEvaluatedKey'])
+        else:
+            break
+    
+    return respond(res=[team_challenges[chId] for chId in sorted(team_challenges, key=lambda t: t)])
+
+
+def get_challenge_hint(event, username):
     return respond(res=
         {
             "hint" : "This is a hint for the challenge"
         }
     )
     
+
 def get_leaderboard():
 
     leaderboard = dict()
 
-    response = query_leaderboard()
+    response = scan_leaderboard()
     while True:
         for team in response['Items']:
             leaderboard[team['teamId']] = team['qualifyingPoints'] + team['pitchPoints'] + team['gamePoints'] + team['kahootPoints']
         
         if 'LastEvaluatedKey' in response:
-            response = query_leaderboard(response['LastEvaluatedKey'])
+            response = scan_leaderboard(response['LastEvaluatedKey'])
         else:
             break
     
     return respond(res=[{ "position": index, "teamName": team, "score": int(leaderboard[team])} for index, team in enumerate(sorted(leaderboard, key=lambda t: leaderboard[t], reverse=True))])
     
-def post_challenge_answer(username):
+
+def post_challenge_answer(event, username):
     return respond()
 
+
+#######################
+# Auth functions
 
 def get_username(event):
     try:
@@ -156,7 +188,11 @@ def get_username(event):
     except Exception:
         return None
 
-def query_leaderboard(startKey=None):
+
+#######################
+# DB helper functions
+
+def scan_leaderboard(startKey=None):
     if startKey:
         return teams_table.scan(
             Select='ALL_ATTRIBUTES',
@@ -167,16 +203,27 @@ def query_leaderboard(startKey=None):
             Select='ALL_ATTRIBUTES'
         )
 
-def query_answers(startKey=None):
-
-    return answers_table.query(
-        IndexName='status-teamId-index',
-        Select='SPECIFIC_ATTRIBUTES',
-        Limit=100,
-        ConsistentRead=False,
-        ScanIndexForward=True,
-        ExclusiveStartKey=startKey,
-        ProjectionExpression='status, teamId, points',
-        KeyConditionExpression=Key('status').eq('APPROVED')
-    )
+def scan_challenges(startKey=None):
+    if startKey:
+        return challenges_table.scan(
+            Select='ALL_ATTRIBUTES',
+            ExclusiveStartKey=startKey
+        )
+    else:
+        return challenges_table.scan(
+            Select='ALL_ATTRIBUTES'
+        )
+    
+def query_answers(teamId, startKey=None):
+    if startKey:
+        return answers_table.query(
+            Select='ALL_ATTRIBUTES',
+            ExclusiveStartKey=startKey,
+            KeyConditionExpression=Key('teamId').eq(teamId)
+        )
+    else:
+        return answers_table.query(
+            Select='ALL_ATTRIBUTES',
+            KeyConditionExpression=Key('teamId').eq(teamId)
+        )
 
