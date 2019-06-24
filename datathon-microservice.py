@@ -1,4 +1,5 @@
 import boto3
+from boto3.dynamodb.conditions import Key, Attr
 import json
 import logging
 
@@ -7,7 +8,11 @@ logger=logging.getLogger()
 logger.setLevel(logging.INFO)
 
 logger.info('Loading function')
-dynamo = boto3.client('dynamodb')
+
+dynamodb = boto3.resource('dynamodb')
+teams_table = dynamodb.Table('datathon-teams')
+challenges_table = dynamodb.Table('datathon-challenges')
+answers_table = dynamodb.Table('datathon-answers')
 
 def respond(err=None, res=None):
     logger.info('Sending response err %s res %s' % (err,json.dumps(res, indent=2)) )
@@ -116,28 +121,44 @@ def get_challenge_hint(event):
     )
     
 def get_leaderboard(event):
-    return respond(res=[
-        {
-            "position": 1,
-            "teamName": "team 1",
-            "score": 400
-        },
-        {
-            "position": 2,
-            "teamName": "team 2",
-            "score": 300
-        },
-        {
-            "position": 3,
-            "teamName": "team 3",
-            "score": 200
-        },
-        {
-            "position": 4,
-            "teamName": "team 4",
-            "score": 100
-        }]
-    )
+
+    points = dict()
+
+    response = query_leaderboard()
+    while True:
+        for team in response['Items']:
+            points[team['teamId']] = team['qualifyingPoints'] + team['pitchPoints'] + team['gamePoints'] + team['kahootPoints']
+        
+        if 'LastEvaluatedKey' in response:
+            response = query_leaderboard(response['LastEvaluatedKey'])
+        else:
+            break
+    
+    return [{ "position": index, "teamName": team, "score": points[team]} for index, team in enumerate(sorted(points, key=lambda t: points[t], reverse=True))]
     
 def post_challenge_answer(event):
     respond()
+
+def query_leaderboard(startKey=None):
+    if startKey:
+        return teams_table.scan(
+            Select='ALL_ATTRIBUTES',
+            ExclusiveStartKey=startKey
+        )
+    else:
+        return teams_table.scan(
+            Select='ALL_ATTRIBUTES'
+        )
+
+def query_answers(startKey=None):
+
+    return answers_table.query(
+        IndexName='status-teamId-index',
+        Select='SPECIFIC_ATTRIBUTES',
+        Limit=100,
+        ConsistentRead=False,
+        ScanIndexForward=True,
+        ExclusiveStartKey=startKey,
+        ProjectionExpression='status, teamId, points',
+        KeyConditionExpression=Key('status').eq('APPROVED')
+    )
