@@ -14,11 +14,11 @@ teams_table = dynamodb.Table('datathon-teams')
 challenges_table = dynamodb.Table('datathon-challenges')
 answers_table = dynamodb.Table('datathon-answers')
 
-def respond(err=None, res=None):
+def respond(err=None, res=None, status=200):
     logger.info('Sending response err %s res %s' % (err,json.dumps(res, indent=2)) )
     return {
         'isBase64Encoded': False,
-        'statusCode': '400' if err else '200',
+        'statusCode': status,
         'body': err if err else json.dumps(res),
         'headers': {
             'Content-Type': 'application/json',
@@ -58,39 +58,48 @@ def lambda_handler(event, context):
 
     '''
     logger.info("Received event: " + json.dumps(event, indent=2))
-
+    
     operation = event['httpMethod']
     resource = event['resource']
-    
+
     logger.debug('Operation %s - resource %s' % (operation,resource) )
 
+    # Methods with no authorization required
+    if operation == 'GET' and resource == '/leaderboard':
+        logger.info('get_leaderboard')
+        return get_leaderboard()
+
+    # Authorization required
+    username = get_username(event)
+    logger.info("Cognito username: " + str(username))
+
+    if username is None:
+        return respond(err="Unauthorized", status=401)
+    
     if operation == 'GET':
         if resource == '/challenges':
             logger.info('get_challenges')
-            return get_challenges(event)
+            return get_challenges(username)
         elif resource == '/challenges/{id}/hint':
             logger.info('get_challenge_hint')
-            return get_challenge_hint(event)
-        elif resource == '/leaderboard':
-            logger.info('get_leaderboard')
-            return get_leaderboard(event)
+            return get_challenge_hint(username)
         else:
             logger.error('No matching GET resource')
-            respond(ValueError('Unknown resource "{}"'.format(resource)))
+            return respond(err=ValueError('Unknown resource "{}"'.format(resource)), status=400)
 
     elif operation == 'POST':
         if resource == '/challenges/{id}/answer':
             logger.info('post_challenge_answer')
-            return post_challenge_answer(event)
+            return post_challenge_answer(username)
         else:
             logger.error('No matching POST resource')
-            respond(ValueError('Unknown resource "{}"'.format(resource)))
+            return respond(err=ValueError('Unknown resource "{}"'.format(resource)), status=400)
 
     else:
         logger.error('No matching method')
-        respond(ValueError('Unsupported method "{}"'.format(operation)))
+        return respond(err=ValueError('Unsupported method "{}"'.format(operation)), status=400)
 
-def get_challenges(event):
+def get_challenges(username):
     return respond(res=[
         {
             "challengeId": "ch01",
@@ -114,14 +123,14 @@ def get_challenges(event):
         }
     ])
 
-def get_challenge_hint(event):
+def get_challenge_hint(username):
     return respond(res=
         {
             "hint" : "This is a hint for the challenge"
         }
     )
     
-def get_leaderboard(event):
+def get_leaderboard():
 
     leaderboard = dict()
 
@@ -137,8 +146,15 @@ def get_leaderboard(event):
     
     return respond(res=[{ "position": index, "teamName": team, "score": int(leaderboard[team])} for index, team in enumerate(sorted(leaderboard, key=lambda t: leaderboard[t], reverse=True))])
     
-def post_challenge_answer(event):
-    respond()
+def post_challenge_answer(username):
+    return respond()
+
+
+def get_username(event):
+    try:
+        return event['requestContext']['authorizer']['claims']['cognito:username']
+    except Exception:
+        return None
 
 def query_leaderboard(startKey=None):
     if startKey:
@@ -163,3 +179,4 @@ def query_answers(startKey=None):
         ProjectionExpression='status, teamId, points',
         KeyConditionExpression=Key('status').eq('APPROVED')
     )
+
