@@ -68,9 +68,24 @@ def lambda_handler(event, context):
     logger.debug('Operation %s - resource %s' % (operation,resource) )
 
     # Methods with no authorization required
-    if operation == 'GET' and resource == '/leaderboard':
-        logger.info('get_leaderboard')
-        return get_leaderboard()
+    if operation == 'GET':
+        if resource == '/leaderboard':
+            logger.info('get_leaderboard')
+            return get_leaderboard()
+        elif resource == '/answers':
+            logger.info('get_answers')
+            return get_answers()
+    
+    elif operation == 'POST':
+        if resource == '/answers/{teamId}/{challengeId}':
+            logger.info('post_answer_approve')
+            return post_answer_approve(event)
+
+    elif operation == 'DELETE':
+        if resource == '/answers/{teamId}/{challengeId}':
+            logger.info('post_answer_reject')
+            return post_answer_reject(event)
+    
 
     # Authorization required
     username = get_username(event)
@@ -97,7 +112,7 @@ def lambda_handler(event, context):
         else: 
             logger.error('No matching POST resource')
             return respond(err=ValueError('Unknown resource "{}"'.format(resource)), status=400)
-
+    
     else:
         logger.error('No matching method')
         return respond(err=ValueError('Unsupported method "{}"'.format(operation)), status=400)
@@ -109,29 +124,9 @@ def lambda_handler(event, context):
 
 def get_challenges(username):
 
-    # Load challenges cache
-    if not challenges:
-        response = scan_challenges()
-        while True:
-            for ch in response['Items']:
-                challenges[ch['challengeId']] = ch
-                challenges[ch['challengeId']].update(
-                    {
-                        "answer": None,
-                        "hinted": False,
-                        "status": "UNANSWERED",
-                        "points": float(ch['points'])
-                    }
-                )
-            
-            if 'LastEvaluatedKey' in response:
-                response = scan_challenges(response['LastEvaluatedKey'])
-            else:
-                break
-
-    # Add team data
-    team_challenges = challenges.copy()
-    response = query_answers(username)
+    # Load challenges cache & add team data
+    team_challenges = get_challenge_cache().copy()
+    response = query_answers_by_team(username)
     while True:
         for answer in response['Items']:
             team_challenges[answer['challengeId']].update(
@@ -143,7 +138,7 @@ def get_challenges(username):
             )
         
         if 'LastEvaluatedKey' in response:
-            response = query_answers(username, response['LastEvaluatedKey'])
+            response = query_answers_by_team(username, response['LastEvaluatedKey'])
         else:
             break
     
@@ -175,18 +170,70 @@ def get_leaderboard():
     return respond(res=[{ "position": index, "teamName": team, "score": int(leaderboard[team])} for index, team in enumerate(sorted(leaderboard, key=lambda t: leaderboard[t], reverse=True))])
     
 
+def get_answers():
+
+    answers = []
+
+    response = query_answers_by_status('ANSWERED')
+    while True:
+        for answer in response['Items']:
+            answers.append({
+                "teamId": answer['teamId'],
+                "challengeId": answer['challengeId'],
+                "challengeTitle": get_challenge_cache()[answer['challengeId']]['title'],
+                "answer": answer['answer']
+            })
+        
+        if 'LastEvaluatedKey' in response:
+            response = query_answers_by_status('ANSWERED', response['LastEvaluatedKey'])
+        else:
+            break
+    
+    return respond(res=answers)
+    
+
 def post_challenge_answer(event, username):
+    return respond()
+
+def post_answer_approve(event):
+    return respond()
+
+def post_answer_reject(event):
     return respond()
 
 
 #######################
-# Auth functions
+# Helper functions
 
 def get_username(event):
     try:
         return event['requestContext']['authorizer']['claims']['cognito:username']
     except Exception:
         return None
+
+def get_challenge_cache():
+    
+    if not challenges:
+
+        # Load challenges cache
+        response = scan_challenges()
+        while True:
+            for ch in response['Items']:
+                challenges[ch['challengeId']] = ch
+                challenges[ch['challengeId']].update(
+                    {
+                        "answer": None,
+                        "hinted": False,
+                        "status": "UNANSWERED",
+                        "points": float(ch['points'])
+                    }
+                )
+            if 'LastEvaluatedKey' in response:
+                response = scan_challenges(response['LastEvaluatedKey'])
+            else:
+                break
+    
+    return challenges
 
 
 #######################
@@ -214,7 +261,7 @@ def scan_challenges(startKey=None):
             Select='ALL_ATTRIBUTES'
         )
     
-def query_answers(teamId, startKey=None):
+def query_answers_by_team(teamId, startKey=None):
     if startKey:
         return answers_table.query(
             Select='ALL_ATTRIBUTES',
@@ -227,3 +274,23 @@ def query_answers(teamId, startKey=None):
             KeyConditionExpression=Key('teamId').eq(teamId)
         )
 
+def query_answers_by_status(status, startKey=None):
+    if startKey:
+        return answers_table.query(
+            IndexName='status-index',
+            Select='ALL_PROJECTED_ATTRIBUTES',
+            ExclusiveStartKey=startKey,
+            #ProjectionExpression='teamId, challengeId, #st',
+            KeyConditionExpression="#st=:stVal",
+            ExpressionAttributeNames={'#st': 'status'},
+            ExpressionAttributeValues={ ":stVal": status}
+        )
+    else:
+        return answers_table.query(
+            IndexName='status-index',
+            Select='ALL_PROJECTED_ATTRIBUTES',
+            #ProjectionExpression='teamId, challengeId, #st',
+            KeyConditionExpression="#st=:stVal",
+            ExpressionAttributeNames={'#st': 'status'},
+            ExpressionAttributeValues={ ":stVal": status}
+        )
