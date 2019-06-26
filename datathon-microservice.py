@@ -247,11 +247,15 @@ def post_challenge_answer(params, body, teamId):
 
     if not 'id' in params:
         return respond(err='Missing challenge ID on path parameters', status=400)
+
+    if body is None or len(body) == 0:
+        return respond(err='Missing message body', status=400)    
     
-    if not 'answer' in body:
+    body_json = json.loads(body)
+    if not 'answer' in body_json:
         return respond(err='Missing answer on message body', status=400)
     
-    answer = body['answer']
+    answer = body_json['answer']
     challengeId = params['id']
     challenges = get_challenge_cache()
     if not challengeId in challenges:
