@@ -136,24 +136,28 @@ def get_challenges(username):
     while True:
         for answer in response['Items']:
 
+            challengeId = answer['challengeId']
             if answer['status'] != 'UNANSWERED':
-                del team_challenges[answer['challengeId']]
+                del team_challenges[challengeId]
             
             else:
-                team_challenges[answer['challengeId']].update(
+                team_challenges[challengeId].update(
                     {
                         "answer": answer['answer'] if 'answer' in answer else None,
-                        "hinted": answer['hinted'],
+                        "hinted": answer['hinted'] if 'hinted' in answer else False,
                         "status": answer['status']
                     }
                 )
-                if not answer['hinted']:
-                    del team_challenges[answer['challengeId']]['hint']
         
         if 'LastEvaluatedKey' in response:
             response = query_answers_by_team(username, response['LastEvaluatedKey'])
         else:
             break
+    
+    # remove hints from non-hinted answers
+    for challenge in team_challenges.values():
+        if not challenge['hinted']:
+            del challenge['hint']
     
     return respond(res=[team_challenges[chId] for chId in sorted(team_challenges, key=lambda t: t)])
 
@@ -185,8 +189,8 @@ def get_challenge_hint(params, teamId):
             },
             ExpressionAttributeValues={
                 ':unanswered': 'UNANSWERED',
-                ':true': 'true',
-                ':false': 'false',
+                ':true': True,
+                ':false': False,
                 ':points': int(points)
             }
         )
@@ -195,7 +199,7 @@ def get_challenge_hint(params, teamId):
         #return respond(err='Hint already requested or question already answered', status=400)
         logger.warn("Team " + teamId + " requested hint for challenge " + challengeId + " but it was already requested or question already answered: " + str(ex))
     
-    logger.info("Team " + teamId + " got hint for challenge " + challengeId)
+    logger.info("DATATHON [" + teamId + "] (" + challengeId + ") Hinted")
 
     return respond(res=
         {
@@ -288,7 +292,7 @@ def post_challenge_answer(params, body, teamId):
         logger.info(ex)
         return respond(err='Question already answered', status=400)
     
-    logger.info("Team " + teamId + " answered challenge " + challengeId)
+    logger.info("DATATHON [" + teamId + "] (" + challengeId + ") Answered")
 
     return respond()
 
@@ -308,7 +312,7 @@ def post_answer_approve(params):
     if not update_game_points(teamId, points):
         return respond(err='Error updating team ' + teamId + ' with ' + points + ' points', status=500)
     
-    logger.info("Team " + teamId + " got " + str(points) + " points for challenge " + challengeId)
+    logger.info("DATATHON [" + teamId + "] (" + challengeId + ") APPROVED - " + str(points) + " points")
 
     return respond()
 
@@ -324,7 +328,7 @@ def post_answer_reject(params):
     if update_approved_status(teamId, challengeId, 'REJECTED') < 0:
         return respond(err='Trying to reject an answer not in ANSWERED status', status=400)
     
-    logger.info("Team " + teamId + " got answer for challenge " + challengeId + " rejected")
+    logger.info("DATATHON [" + teamId + "] (" + challengeId + ") REJECTED")
 
     return respond()
 
@@ -479,7 +483,7 @@ def update_approved_status(teamId, challengeId, status):
         points = response['Attributes']['points']
 
         # hinted answers get half points
-        if 'hinted' in response['Attributes'] and response['Attributes']['hinted'] == 'true':
+        if 'hinted' in response['Attributes'] and response['Attributes']['hinted'] is True:
             points /= 2
 
     except Exception as ex:
