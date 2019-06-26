@@ -2,6 +2,10 @@ import boto3
 from boto3.dynamodb.conditions import Key, Attr
 import json
 import logging
+import copy
+import time
+
+current_milli_time = lambda: int(round(time.time() * 1000))
 
 ## Logging setup
 logger=logging.getLogger()
@@ -15,7 +19,9 @@ challenges_table = dynamodb.Table('datathon-challenges')
 answers_table = dynamodb.Table('datathon-answers')
 
 # challenges cache
-challenges = dict()
+challenge_cache = dict()
+cache_load_time = 0
+CACHE_EXPIRATION = 10000
 
 def respond(err=None, res=None, status=200):
     logger.info('Sending response err %s res %s' % (err,json.dumps(res, indent=2)) )
@@ -79,16 +85,16 @@ def lambda_handler(event, context):
     elif operation == 'POST':
         if resource == '/answers/{teamId}/{challengeId}':
             logger.info('post_answer_approve')
-            return post_answer_approve(event)
+            return post_answer_approve(event['pathParameters'])
 
     elif operation == 'DELETE':
         if resource == '/answers/{teamId}/{challengeId}':
             logger.info('post_answer_reject')
-            return post_answer_reject(event)
+            return post_answer_reject(event['pathParameters'])
     
 
     # Authorization required
-    username = get_username(event)
+    username = get_username(event['requestContext'])
     logger.info("Cognito username: " + str(username))
 
     if username is None:
@@ -100,22 +106,22 @@ def lambda_handler(event, context):
             return get_challenges(username)
         elif resource == '/challenges/{id}/hint':
             logger.info('get_challenge_hint')
-            return get_challenge_hint(event, username)
+            return get_challenge_hint(event['pathParameters'], username)
         else:
             logger.error('No matching GET resource')
-            return respond(err=ValueError('Unknown resource "{}"'.format(resource)), status=400)
+            return respond(err='Unknown resource "{}"'.format(resource), status=400)
 
     elif operation == 'POST':
         if resource == '/challenges/{id}/answer':
             logger.info('post_challenge_answer')
-            return post_challenge_answer(event, username)
+            return post_challenge_answer(event['pathParameters'], username)
         else: 
             logger.error('No matching POST resource')
-            return respond(err=ValueError('Unknown resource "{}"'.format(resource)), status=400)
+            return respond(err='Unknown resource "{}"'.format(resource), status=400)
     
     else:
         logger.error('No matching method')
-        return respond(err=ValueError('Unsupported method "{}"'.format(operation)), status=400)
+        return respond(err='Unsupported method "{}"'.format(operation), status=400)
 
 
 #################
@@ -125,7 +131,7 @@ def lambda_handler(event, context):
 def get_challenges(username):
 
     # Load challenges cache & add team data
-    team_challenges = get_challenge_cache().copy()
+    team_challenges = copy.deepcopy(get_challenge_cache())
     response = query_answers_by_team(username)
     while True:
         for answer in response['Items']:
@@ -136,6 +142,8 @@ def get_challenges(username):
                     "status": answer['status']
                 }
             )
+            if not answer['hinted']:
+                del team_challenges[answer['challengeId']]['hint']
         
         if 'LastEvaluatedKey' in response:
             response = query_answers_by_team(username, response['LastEvaluatedKey'])
@@ -145,10 +153,45 @@ def get_challenges(username):
     return respond(res=[team_challenges[chId] for chId in sorted(team_challenges, key=lambda t: t)])
 
 
-def get_challenge_hint(event, username):
+def get_challenge_hint(params, username):
+
+    if not 'id' in params:
+        return respond(err='Missing challenge ID on path parameters', status=400)
+    
+    challengeId = params['id']
+    challenges = get_challenge_cache()
+    if not challengeId in challenges:
+        return respond(err='Challenge ID not found', status=404)
+    
+    hint = challenges[challengeId]['hint']
+    points = challenges[challengeId]['points']
+
+    # mark challenge for team as hinted
+    try:
+        answers_table.update_item(
+            Key={
+                'teamId': username,
+                'challengeId': challengeId
+            },
+            UpdateExpression='SET hinted = :true, #statusAttr = :unanswered, points = :points',
+            ConditionExpression='(attribute_not_exists(#statusAttr) or #statusAttr = :unanswered) and (attribute_not_exists(hinted) or hinted = :false)',
+            ExpressionAttributeNames={
+                '#statusAttr': 'status'
+            },
+            ExpressionAttributeValues={
+                ':unanswered': 'UNANSWERED',
+                ':true': 'true',
+                ':false': 'false',
+                ':points': int(points)
+            }
+        )
+
+    except Exception:
+        return respond(err='Hint already requested or question already answered', status=400)
+    
     return respond(res=
         {
-            "hint" : "This is a hint for the challenge"
+            "hint" : hint
         }
     )
     
@@ -192,48 +235,52 @@ def get_answers():
     return respond(res=answers)
     
 
-def post_challenge_answer(event, username):
+def post_challenge_answer(params, username):
     return respond()
 
-def post_answer_approve(event):
+def post_answer_approve(params):
     return respond()
 
-def post_answer_reject(event):
+def post_answer_reject(params):
     return respond()
 
 
 #######################
 # Helper functions
 
-def get_username(event):
+def get_username(context):
     try:
-        return event['requestContext']['authorizer']['claims']['cognito:username']
+        return context['authorizer']['claims']['cognito:username']
     except Exception:
         return None
 
 def get_challenge_cache():
-    
-    if not challenges:
+
+    global challenge_cache, cache_load_time
+
+    if not challenge_cache or current_milli_time() - cache_load_time > CACHE_EXPIRATION:
 
         # Load challenges cache
         response = scan_challenges()
         while True:
             for ch in response['Items']:
-                challenges[ch['challengeId']] = ch
-                challenges[ch['challengeId']].update(
+                challenge_cache[ch['challengeId']] = ch
+                challenge_cache[ch['challengeId']].update(
                     {
                         "answer": None,
                         "hinted": False,
                         "status": "UNANSWERED",
-                        "points": float(ch['points'])
+                        "points": int(ch['points'])
                     }
                 )
             if 'LastEvaluatedKey' in response:
                 response = scan_challenges(response['LastEvaluatedKey'])
             else:
                 break
+        
+        cache_load_time = current_milli_time()
     
-    return challenges
+    return challenge_cache
 
 
 #######################
