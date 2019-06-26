@@ -135,15 +135,20 @@ def get_challenges(username):
     response = query_answers_by_team(username)
     while True:
         for answer in response['Items']:
-            team_challenges[answer['challengeId']].update(
-                {
-                    "answer": answer['answer'] if 'answer' in answer else None,
-                    "hinted": answer['hinted'],
-                    "status": answer['status']
-                }
-            )
-            if not answer['hinted']:
-                del team_challenges[answer['challengeId']]['hint']
+
+            if answer['status'] != 'UNANSWERED':
+                del team_challenges[answer['challengeId']]
+            
+            else:
+                team_challenges[answer['challengeId']].update(
+                    {
+                        "answer": answer['answer'] if 'answer' in answer else None,
+                        "hinted": answer['hinted'],
+                        "status": answer['status']
+                    }
+                )
+                if not answer['hinted']:
+                    del team_challenges[answer['challengeId']]['hint']
         
         if 'LastEvaluatedKey' in response:
             response = query_answers_by_team(username, response['LastEvaluatedKey'])
@@ -186,8 +191,9 @@ def get_challenge_hint(params, teamId):
             }
         )
 
-    except Exception:
-        return respond(err='Hint already requested or question already answered', status=400)
+    except Exception as ex:
+        #return respond(err='Hint already requested or question already answered', status=400)
+        logger.warn("Team " + teamId + " requested hint for challenge " + challengeId + " but it was already requested or question already answered: " + str(ex))
     
     logger.info("Team " + teamId + " got hint for challenge " + challengeId)
 
@@ -260,7 +266,7 @@ def post_challenge_answer(params, body, teamId):
                 'teamId': teamId,
                 'challengeId': challengeId
             },
-            UpdateExpression='SET #statusAttr = :answered, points = :points, answer = :answer',
+            UpdateExpression='SET #statusAttr = :answered, points = :points, answer = :answer, answerTime = :answerTime',
             ConditionExpression='attribute_not_exists(#statusAttr) or #statusAttr = :unanswered',
             ExpressionAttributeNames={
                 '#statusAttr': 'status'
@@ -269,7 +275,8 @@ def post_challenge_answer(params, body, teamId):
                 ':answered': 'ANSWERED',
                 ':unanswered': 'UNANSWERED',
                 ':points': int(points),
-                ':answer': answer
+                ':answer': answer,
+                ':answerTime': current_milli_time()
             }
         )
 
@@ -450,14 +457,15 @@ def update_approved_status(teamId, challengeId, status):
                 'teamId': teamId,
                 'challengeId': challengeId
             },
-            UpdateExpression='SET #statusAttr = :newstatus',
+            UpdateExpression='SET #statusAttr = :newstatus, reviewTime = :reviewTime',
             ConditionExpression='#statusAttr = :answered',
             ExpressionAttributeNames={
                 '#statusAttr': 'status'
             },
             ExpressionAttributeValues={
                 ':answered': 'ANSWERED',
-                ':newstatus': status
+                ':newstatus': status,
+                ':reviewTime': current_milli_time()
             },
             ReturnValues='ALL_NEW'
         )
